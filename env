@@ -2,6 +2,7 @@
 REMOTE_USER=root
 REMOTE_HOST=192.168.1.100
 SSH_PORT=22
+SSH_PASSWORD=
 
 # ==================== 性能与行为配置 ====================
 THREAD_NUM=8

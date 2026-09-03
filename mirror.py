@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-# 多目录稀疏镜像同步工具
-# 配置方式：优先读取同目录下 .env 文件（无需第三方依赖），无则使用脚本内默认配置
+# 多目录稀疏镜像同步工具（支持密码/密钥双模式）
+# 配置方式：优先读取同目录下 .env 文件（零依赖），无则使用脚本内默认配置
 
 import os
 import sys
@@ -15,6 +15,7 @@ DEFAULT_CONFIG = {
     "REMOTE_USER": "your_username",
     "REMOTE_HOST": "192.168.1.100",
     "SSH_PORT": 22,
+    "SSH_PASSWORD": "",          # 留空则使用SSH Key/系统默认认证；填写密码则用密码登录
     
     # 性能配置
     "THREAD_NUM": 8,
@@ -24,7 +25,6 @@ DEFAULT_CONFIG = {
     "REMOTE_ENCODING": "auto",
     
     # 目录映射（多组，一一对应）
-    # 格式：[(远程目录1, 本地镜像1), (远程目录2, 本地镜像2)]
     "PATH_MAPPINGS": [
         # ("/data/source_1", "/data/mirror/source_1"),
         # ("/data/source_2", "/data/mirror/source_2"),
@@ -34,10 +34,7 @@ DEFAULT_CONFIG = {
 
 
 def parse_env_file(env_path):
-    """
-    内置轻量级 .env 文件解析器，不依赖任何第三方库
-    支持：KEY=VALUE、注释行(#)、空行、值带引号
-    """
+    """内置轻量级 .env 文件解析器，零依赖"""
     env_vars = {}
     if not os.path.exists(env_path):
         return env_vars
@@ -45,10 +42,8 @@ def parse_env_file(env_path):
     with open(env_path, "r", encoding="utf-8") as f:
         for line in f:
             line = line.strip()
-            # 跳过空行和注释
             if not line or line.startswith("#"):
                 continue
-            # 跳过没有等号的行
             if "=" not in line:
                 continue
             
@@ -56,7 +51,6 @@ def parse_env_file(env_path):
             key = key.strip()
             value = value.strip()
             
-            # 去除首尾引号
             if len(value) >= 2 and value[0] in ('"', "'") and value[-1] == value[0]:
                 value = value[1:-1]
             
@@ -66,13 +60,12 @@ def parse_env_file(env_path):
 
 
 def load_config():
-    """加载配置：优先.env文件（内置解析器，零依赖），兜底用内置默认"""
+    """加载配置：优先.env文件，兜底用内置默认"""
     config = DEFAULT_CONFIG.copy()
     
-    # 查找 .env 文件
     env_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
     
-    # 优先尝试 python-dotenv（如果已安装）
+    # 优先尝试 python-dotenv
     dotenv_loaded = False
     try:
         from dotenv import load_dotenv
@@ -82,22 +75,23 @@ def load_config():
     except ImportError:
         pass
     
-    # 没装 dotenv 或加载失败，用内置解析器读取 .env 并注入环境变量
+    # 没装 dotenv 用内置解析器
     if not dotenv_loaded and os.path.exists(env_path):
         env_vars = parse_env_file(env_path)
         for key, value in env_vars.items():
             os.environ[key] = value
     
-    # 如果存在 .env 文件，从环境变量读取配置覆盖默认值
+    # 从环境变量覆盖配置
     if os.path.exists(env_path):
         config["REMOTE_USER"] = os.getenv("REMOTE_USER", config["REMOTE_USER"])
         config["REMOTE_HOST"] = os.getenv("REMOTE_HOST", config["REMOTE_HOST"])
         config["SSH_PORT"] = int(os.getenv("SSH_PORT", config["SSH_PORT"]))
+        config["SSH_PASSWORD"] = os.getenv("SSH_PASSWORD", config["SSH_PASSWORD"])
         config["THREAD_NUM"] = int(os.getenv("THREAD_NUM", config["THREAD_NUM"]))
         config["SET_READONLY"] = os.getenv("SET_READONLY", "True").lower() in ("true", "1", "yes")
         config["REMOTE_ENCODING"] = os.getenv("REMOTE_ENCODING", config["REMOTE_ENCODING"])
         
-        # 解析多组目录映射（自动扫描 REMOTE_PATH_N / LOCAL_PATH_N）
+        # 解析多组目录映射
         mappings = []
         index = 1
         while True:
@@ -115,7 +109,6 @@ def load_config():
         if mappings:
             config["PATH_MAPPINGS"] = mappings
     
-    # 校验配置
     if not config["PATH_MAPPINGS"]:
         print("=" * 60)
         print("错误：未配置任何目录映射！")
@@ -146,6 +139,64 @@ def decode_bytes(raw_bytes, encoding="auto"):
     return raw_bytes.decode("utf-8", errors="replace")
 
 
+def run_remote_command(remote_user, remote_host, ssh_port, ssh_password, command, encoding="auto"):
+    """
+    统一远程命令执行入口，自动选择认证方式
+    - 有密码：优先用 sshpass，其次用 paramiko
+    - 无密码：用系统默认 ssh（Key 认证）
+    返回：(stdout_bytes, stderr_bytes, returncode)
+    """
+    # 方式1：无密码，使用系统默认ssh（密钥/agent/known_hosts）
+    if not ssh_password:
+        cmd = ["ssh", "-p", str(ssh_port), f"{remote_user}@{remote_host}", command]
+        result = subprocess.run(cmd, capture_output=True)
+        return result.stdout, result.stderr, result.returncode
+    
+    # 方式2：有密码，优先尝试 sshpass
+    if subprocess.run(["which", "sshpass"], capture_output=True).returncode == 0:
+        cmd = [
+            "sshpass", "-p", ssh_password,
+            "ssh", "-p", str(ssh_port),
+            "-o", "StrictHostKeyChecking=no",
+            "-o", "UserKnownHostsFile=/dev/null",
+            f"{remote_user}@{remote_host}",
+            command
+        ]
+        result = subprocess.run(cmd, capture_output=True)
+        return result.stdout, result.stderr, result.returncode
+    
+    # 方式3：有密码但没装 sshpass，尝试 paramiko
+    try:
+        import paramiko
+        client = paramiko.SSHClient()
+        client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        client.connect(
+            hostname=remote_host,
+            port=ssh_port,
+            username=remote_user,
+            password=ssh_password,
+            timeout=30
+        )
+        stdin, stdout, stderr = client.exec_command(command)
+        out = stdout.read()
+        err = stderr.read()
+        ret = stdout.channel.recv_exit_status()
+        client.close()
+        return out, err, ret
+    except ImportError:
+        pass
+    
+    # 都不可用，报错
+    error_msg = (
+        "错误：配置了 SSH_PASSWORD 但系统未安装 sshpass，也没有 paramiko 库。\n"
+        "请选择以下任一方式解决：\n"
+        "1. 安装 sshpass：apt-get install sshpass / yum install sshpass\n"
+        "2. 安装 paramiko：pip3 install paramiko\n"
+        "3. 配置 SSH 免密登录，将 SSH_PASSWORD 留空"
+    )
+    return b"", error_msg.encode("utf-8"), 1
+
+
 class SparseMirrorTask:
     """单个目录同步任务"""
     def __init__(self, remote_path, local_path, global_config):
@@ -153,10 +204,10 @@ class SparseMirrorTask:
         self.local_path = local_path.rstrip("/")
         self.state_dir = os.path.join(self.local_path, ".mirror_state")
         
-        # 继承全局配置
         self.remote_user = global_config["REMOTE_USER"]
         self.remote_host = global_config["REMOTE_HOST"]
         self.ssh_port = global_config["SSH_PORT"]
+        self.ssh_password = global_config["SSH_PASSWORD"]
         self.thread_num = global_config["THREAD_NUM"]
         self.set_readonly = global_config["SET_READONLY"]
         self.remote_encoding = global_config["REMOTE_ENCODING"]
@@ -174,19 +225,19 @@ class SparseMirrorTask:
     def fetch_remote_meta(self):
         """拉取远程文件元数据"""
         self.log("拉取远程文件元数据...")
-        cmd = [
-            "ssh", "-p", str(self.ssh_port),
-            f"{self.remote_user}@{self.remote_host}",
-            f"cd '{self.remote_path}' && find . -type f -printf '%P\\t%s\\t%T@\\n'"
-        ]
         
-        try:
-            result = subprocess.run(cmd, capture_output=True, check=True)
-        except subprocess.CalledProcessError as e:
-            self.log(f"远程拉取失败：{decode_bytes(e.stderr, self.remote_encoding).strip()}")
+        command = f"cd '{self.remote_path}' && find . -type f -printf '%P\\t%s\\t%T@\\n'"
+        
+        stdout, stderr, returncode = run_remote_command(
+            self.remote_user, self.remote_host, self.ssh_port,
+            self.ssh_password, command, self.remote_encoding
+        )
+        
+        if returncode != 0:
+            self.log(f"远程拉取失败：{decode_bytes(stderr, self.remote_encoding).strip()}")
             return None
         
-        output = decode_bytes(result.stdout, self.remote_encoding)
+        output = decode_bytes(stdout, self.remote_encoding)
         meta = {}
         
         for line in output.strip().split("\n"):
@@ -295,7 +346,6 @@ class SparseMirrorTask:
             if os.path.isfile(target):
                 os.remove(target)
         
-        # 自底向上清理空目录
         for root, dirs, files in os.walk(self.local_path, topdown=False):
             if root == self.state_dir or root.startswith(self.state_dir + os.sep):
                 continue
@@ -347,9 +397,12 @@ class SparseMirrorTask:
 def main():
     config = load_config()
     
+    auth_mode = "密码登录" if config["SSH_PASSWORD"] else "SSH Key / 系统默认认证"
+    
     print("=" * 50)
     print(f"共配置 {len(config['PATH_MAPPINGS'])} 个同步任务")
     print(f"远程服务器：{config['REMOTE_USER']}@{config['REMOTE_HOST']}:{config['SSH_PORT']}")
+    print(f"认证方式：{auth_mode}")
     print(f"并发线程数：{config['THREAD_NUM']}")
     print("=" * 50)
     print()

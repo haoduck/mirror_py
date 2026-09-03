@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 # 多目录稀疏镜像同步工具
-# 配置方式：优先读取同目录下 .env 文件，无则使用脚本内默认配置
+# 配置方式：优先读取同目录下 .env 文件（无需第三方依赖），无则使用脚本内默认配置
 
 import os
 import sys
@@ -32,24 +32,64 @@ DEFAULT_CONFIG = {
 }
 # ==========================================================================
 
-# 尝试加载 dotenv（可选依赖，未安装不影响使用）
-try:
-    from dotenv import load_dotenv
-    HAS_DOTENV = True
-except ImportError:
-    HAS_DOTENV = False
+
+def parse_env_file(env_path):
+    """
+    内置轻量级 .env 文件解析器，不依赖任何第三方库
+    支持：KEY=VALUE、注释行(#)、空行、值带引号
+    """
+    env_vars = {}
+    if not os.path.exists(env_path):
+        return env_vars
+    
+    with open(env_path, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            # 跳过空行和注释
+            if not line or line.startswith("#"):
+                continue
+            # 跳过没有等号的行
+            if "=" not in line:
+                continue
+            
+            key, value = line.split("=", 1)
+            key = key.strip()
+            value = value.strip()
+            
+            # 去除首尾引号
+            if len(value) >= 2 and value[0] in ('"', "'") and value[-1] == value[0]:
+                value = value[1:-1]
+            
+            env_vars[key] = value
+    
+    return env_vars
 
 
 def load_config():
-    """加载配置：优先.env，兜底用内置默认"""
+    """加载配置：优先.env文件（内置解析器，零依赖），兜底用内置默认"""
     config = DEFAULT_CONFIG.copy()
     
-    # 加载 .env 文件
+    # 查找 .env 文件
     env_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
-    if HAS_DOTENV and os.path.exists(env_path):
-        load_dotenv(env_path)
-        
-        # 覆盖全局配置
+    
+    # 优先尝试 python-dotenv（如果已安装）
+    dotenv_loaded = False
+    try:
+        from dotenv import load_dotenv
+        if os.path.exists(env_path):
+            load_dotenv(env_path, override=True)
+            dotenv_loaded = True
+    except ImportError:
+        pass
+    
+    # 没装 dotenv 或加载失败，用内置解析器读取 .env 并注入环境变量
+    if not dotenv_loaded and os.path.exists(env_path):
+        env_vars = parse_env_file(env_path)
+        for key, value in env_vars.items():
+            os.environ[key] = value
+    
+    # 如果存在 .env 文件，从环境变量读取配置覆盖默认值
+    if os.path.exists(env_path):
         config["REMOTE_USER"] = os.getenv("REMOTE_USER", config["REMOTE_USER"])
         config["REMOTE_HOST"] = os.getenv("REMOTE_HOST", config["REMOTE_HOST"])
         config["SSH_PORT"] = int(os.getenv("SSH_PORT", config["SSH_PORT"]))
@@ -77,7 +117,13 @@ def load_config():
     
     # 校验配置
     if not config["PATH_MAPPINGS"]:
-        print("错误：未配置任何目录映射，请在.env或脚本内PATH_MAPPINGS中添加")
+        print("=" * 60)
+        print("错误：未配置任何目录映射！")
+        print("")
+        print("请选择以下任一方式配置：")
+        print("1. 在脚本同目录创建 .env 文件，配置 REMOTE_PATH_N / LOCAL_PATH_N")
+        print("2. 直接修改脚本内 DEFAULT_CONFIG 中的 PATH_MAPPINGS")
+        print("=" * 60)
         sys.exit(1)
     
     return config

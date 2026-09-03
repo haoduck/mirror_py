@@ -1,0 +1,20 @@
+# ==================== 全局服务器配置 ====================
+REMOTE_USER=root
+REMOTE_HOST=192.168.1.100
+SSH_PORT=22
+
+# ==================== 性能与行为配置 ====================
+THREAD_NUM=8
+SET_READONLY=True
+REMOTE_ENCODING=auto
+
+# ==================== 目录映射配置 ====================
+# 格式：REMOTE_PATH_N = 远程目录绝对路径
+#      LOCAL_PATH_N  = 本地镜像目录绝对路径
+# 序号从1开始，可无限追加，一一对应
+
+REMOTE_PATH_1=/data/source_files
+LOCAL_PATH_1=/data/mirror/source_files
+
+REMOTE_PATH_2=/home/user/documents
+LOCAL_PATH_2=/data/mirror/documents

@@ -339,23 +339,43 @@ class SparseMirrorTask:
         if not delete_list:
             self.log("无删除文件，跳过处理")
             return
-        
+
         self.log(f"删除 {len(delete_list)} 个文件")
         for path in delete_list:
             target = os.path.join(self.local_path, path)
             if os.path.isfile(target):
+                # Windows 下只读文件需要先去掉只读才能删除
+                if IS_WINDOWS:
+                    kernel32.SetFileAttributesW(target, FILE_ATTRIBUTE_NORMAL)
                 os.remove(target)
-        
-        for root, dirs, files in os.walk(self.local_path, topdown=False):
+
+        # ========== 修复：健壮的空目录清理 ==========
+        # 先收集所有目录路径（不依赖动态遍历状态）
+        all_dirs = []
+        for root, dirs, files in os.walk(self.local_path, topdown=True):
+            # 跳过状态目录及其子目录
             if root == self.state_dir or root.startswith(self.state_dir + os.sep):
                 continue
-            if not os.listdir(root):
-                try:
-                    os.rmdir(root)
-                except OSError:
-                    pass
-        
-        self.log("删除完成，已清理空目录")
+            all_dirs.append(root)
+
+        # 按路径深度从深到浅排序：先删最内层空目录，父目录自然变空后再删
+        all_dirs.sort(key=lambda p: p.count(os.sep), reverse=True)
+
+        removed_dirs = 0
+        for d in all_dirs:
+            try:
+                # 确认真的为空（包括隐藏文件）
+                if not os.listdir(d):
+                    # Windows 下先去掉目录只读属性
+                    if IS_WINDOWS:
+                        kernel32.SetFileAttributesW(d, FILE_ATTRIBUTE_NORMAL)
+                    os.rmdir(d)
+                    removed_dirs += 1
+            except OSError:
+                pass
+
+        self.log(f"删除完成，已清理 {removed_dirs} 个空目录")
+
     
     def save_meta(self, meta):
         """保存元数据到本地"""
